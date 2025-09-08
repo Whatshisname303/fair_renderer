@@ -2,6 +2,8 @@ use std::error::Error;
 use std::path::PathBuf;
 use std::{fmt, fs, io};
 
+use yaml_rust2::Yaml;
+
 #[derive(Debug)]
 struct ArgumentError(String);
 
@@ -18,9 +20,14 @@ impl From<io::Error> for ArgumentError {
         ArgumentError(value.to_string())
     }
 }
-impl From<serde_yaml_ng::Error> for ArgumentError {
-    fn from(_: serde_yaml_ng::Error) -> Self {
-        ArgumentError("failed to parse yaml".to_string())
+impl From<std::str::Utf8Error> for ArgumentError {
+    fn from(_: std::str::Utf8Error) -> Self {
+        ArgumentError("found invalid utf8".to_string())
+    }
+}
+impl From<yaml_rust2::ScanError> for ArgumentError {
+    fn from(_: yaml_rust2::ScanError) -> Self {
+        ArgumentError("yaml scan error".to_string())
     }
 }
 
@@ -143,13 +150,13 @@ fn main() -> Result<(), ArgumentError> {
 
     let template_path = "./vault_templates/career_fair_2025";
 
-    let file_class = fs::read(PathBuf::from(template_path).join("classes/company.md"))?;
-    let file_class_yaml = serde_yaml_ng::to_value(file_class)?;
-
-    // todo: read file class from template and set up metadata properly
+    let user_fields = match read_fileclass_yaml(PathBuf::from(template_path).join("classes/company.md")) {
+        Some(fields) => fields,
+        None => return Err(ArgumentError("failed reading fileClass yaml".to_string())),
+    };
 
     if no_output {
-        print!("Exiting with no output");
+        println!("Exiting with no output");
         return Ok(());
     }
 
@@ -159,26 +166,89 @@ fn main() -> Result<(), ArgumentError> {
     };
 
     copy_dir_recurse(template_path.into(), output_path.clone().into())?;
+    // todo: append company data to yaml and write new file
 
     let companies_dir = PathBuf::from(output_path.clone()).join("companies");
 
     for (i, company) in companies.iter().enumerate() {
         let file_path = companies_dir.join(company.name.clone() + ".md");
 
-        let mut file_text = "---
-        fileClass: company".to_string();
+        let mut file_text = "---\nfileClass: company\n".to_string();
 
+        for field in &user_fields {
+            file_text.push_str(field);
+            file_text.push_str(": \n");
+        }
+
+        file_text.push_str(&format!("location: {}\n", company.location));
+        file_text.push_str(&format!("majors: {}\n", company.majors.join(", ")));
+        file_text.push_str(&format!("job_titles: {}\n", company.job_titles));
+        file_text.push_str(&format!("job_types: {}\n", company.job_types.join(", ")));
+        file_text.push_str(&format!("school_years: {}\n", company.school_years.join(", ")));
+        file_text.push_str(&format!("international: {}\n", company.work_authorization));
+        file_text.push_str(&format!("sessions: {}\n", company.attending_sessions.join(", ")));
+        file_text.push_str(&format!("website: {}\n", company.website));
+
+        // end frontmatter
+        file_text.push_str("---\n\n");
+
+        file_text.push_str(&format!("<img src=\"{}\" style=\"width: 80px;\">\n\n", company.logo_url));
+        file_text.push_str(&format!("### Description\n\n{}\n", company.description));
 
         if fs::write(&file_path, &file_text).is_err() {
-            // print errors if verbose
-            // println!("failed writing {}", file_path.to_string_lossy());
-            let file_path = companies_dir.join(format!("error{i}.md"));
-            // todo: append error text with correct name into file content
-            fs::write(file_path, &file_text)?;
+            let alt_path = companies_dir.join(format!("error{i}.md"));
+            if is_verbose {
+                println!("Failed to write: {}. Instead writing: {}", file_path.to_string_lossy(), alt_path.to_string_lossy());
+            }
+            file_text.push_str("==This file failed to write, likely because of an issue with the name. If everything else looks fine then you can set the name yourself==\n\n");
+            file_text.push_str(&format!("**Company name:** {}\n", company.name));
+            fs::write(alt_path, &file_text)?;
         }
     }
 
     Ok(())
+}
+
+fn read_fileclass_yaml(file_path: PathBuf) -> Option<Vec<String>> {
+    let file_class_bytes = fs::read(file_path).ok()?;
+    let file_class_str = std::str::from_utf8(clean_yaml_md_file(&file_class_bytes)).ok()?;
+    let file_class_yaml = yaml_rust2::YamlLoader::load_from_str(file_class_str).ok()?;
+    let file_class = file_class_yaml.first()?;
+
+    let fields = file_class.as_hash()?.get(&Yaml::from_str("fields"))?.as_vec()?;
+
+    let mut field_names = Vec::with_capacity(fields.len());
+
+    for field in fields {
+        field_names.push(field.as_hash()?.get(&Yaml::from_str("name"))?.as_str()?.to_owned());
+    }
+
+    Some(field_names)
+}
+
+fn append_company_data_to_fileclass() {
+}
+
+fn write_frontmatter() {
+}
+
+// ugly code to strip the --- off the start and end from inline yaml
+fn clean_yaml_md_file(mut bytes: &[u8]) -> &[u8] {
+    while bytes.len() > 1 && bytes[0] != b'\r' && bytes[0] != b'\n' {
+        bytes = &bytes[1..];
+    }
+    bytes = &bytes[1..];
+
+    if bytes[0] == b'\n' {
+        bytes = &bytes[1..];
+    }
+
+    while bytes.len() > 1 && bytes[bytes.len() - 1] == b'-' {
+        let n = bytes.len() - 1;
+        bytes = &bytes[..n];
+    }
+
+    return bytes;
 }
 
 fn copy_dir_recurse(src: std::path::PathBuf, dst: std::path::PathBuf) -> io::Result<()> {
@@ -193,26 +263,3 @@ fn copy_dir_recurse(src: std::path::PathBuf, dst: std::path::PathBuf) -> io::Res
     }
     Ok(())
 }
-
-// write fileClass first
-// then write user metadata
-// then write company data
-// add any necessary error messages
-// add description
-// write file
-
-static TEMPLATE_MD: &str = r####"
----
-fileClass: company
-Work:
-Priority: Low
-Size: Idk
-Software Focus: false
-Done: false
-Link:
----
-
-**Description:**
-
-
-"####;
