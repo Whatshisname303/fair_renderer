@@ -1,8 +1,8 @@
-use std::error::Error;
 use std::path::PathBuf;
 use std::{fmt, fs, io};
 
-use yaml_rust2::Yaml;
+use yaml_rust2::{Yaml, YamlEmitter};
+use yaml_rust2::yaml::Hash;
 
 #[derive(Debug)]
 struct ArgumentError(String);
@@ -13,7 +13,7 @@ impl fmt::Display for ArgumentError {
     }
 }
 
-impl Error for ArgumentError {}
+impl std::error::Error for ArgumentError {}
 
 impl From<io::Error> for ArgumentError {
     fn from(value: io::Error) -> Self {
@@ -148,10 +148,10 @@ fn main() -> Result<(), ArgumentError> {
 
     println!("rendering data for {} companies", companies.len());
 
-    let template_path = "./vault_templates/career_fair_2025";
+    let template_path = "./vault_templates/career_fair_2025_template";
 
-    let user_fields = match read_fileclass_yaml(PathBuf::from(template_path).join("classes/company.md")) {
-        Some(fields) => fields,
+    let (user_fields, new_fileclass) = match read_fileclass_yaml(PathBuf::from(template_path).join("classes/company.md")) {
+        Some((fields, fileclass)) => (fields, fileclass),
         None => return Err(ArgumentError("failed reading fileClass yaml".to_string())),
     };
 
@@ -166,7 +166,7 @@ fn main() -> Result<(), ArgumentError> {
     };
 
     copy_dir_recurse(template_path.into(), output_path.clone().into())?;
-    // todo: append company data to yaml and write new file
+    fs::write(PathBuf::from(output_path.clone()).join("classes/company.md"), new_fileclass)?;
 
     let companies_dir = PathBuf::from(output_path.clone()).join("companies");
 
@@ -209,27 +209,54 @@ fn main() -> Result<(), ArgumentError> {
     Ok(())
 }
 
-fn read_fileclass_yaml(file_path: PathBuf) -> Option<Vec<String>> {
+fn read_fileclass_yaml(file_path: PathBuf) -> Option<(Vec<String>, String)> {
     let file_class_bytes = fs::read(file_path).ok()?;
     let file_class_str = std::str::from_utf8(clean_yaml_md_file(&file_class_bytes)).ok()?;
-    let file_class_yaml = yaml_rust2::YamlLoader::load_from_str(file_class_str).ok()?;
-    let file_class = file_class_yaml.first()?;
+    let mut file_class_yaml = yaml_rust2::YamlLoader::load_from_str(file_class_str).ok()?;
+    let file_class = file_class_yaml.first_mut()?.as_mut_hash()?;
 
-    let fields = file_class.as_hash()?.get(&Yaml::from_str("fields"))?.as_vec()?;
+    let fields = file_class.get_mut(&Yaml::String("fields".to_string()))?.as_mut_vec()?;
 
     let mut field_names = Vec::with_capacity(fields.len());
 
-    for field in fields {
+    for field in fields.iter() {
         field_names.push(field.as_hash()?.get(&Yaml::from_str("name"))?.as_str()?.to_owned());
     }
 
-    Some(field_names)
-}
+    let field_strings = [
+        "location", "majors", "job_titles", "job_types", "school_years",
+        "international", "sessions", "website",
+    ];
+    let mut id = [b'a', b'b', b'c', b'd', b'e', b'f'];
 
-fn append_company_data_to_fileclass() {
-}
+    for st in field_strings {
+        let mut hash = Hash::new();
+        hash.insert(Yaml::String("name".to_string()), Yaml::String(st.to_string()));
+        hash.insert(Yaml::String("type".to_string()), Yaml::String("Input".to_string()));
+        hash.insert(Yaml::String("options".to_string()), Yaml::Hash(Hash::new()));
+        hash.insert(Yaml::String("path".to_string()), Yaml::String("".to_string()));
+        hash.insert(Yaml::String("id".to_string()), Yaml::String(std::str::from_utf8(&id).unwrap().to_string()));
 
-fn write_frontmatter() {
+        id[0] += 1;
+        fields.push(Yaml::Hash(hash));
+    }
+
+    let mut id = [b'a', b'b', b'c', b'd', b'e', b'f'];
+
+    // second loop needed to drop mutable reference (fields)
+    for _ in field_strings {
+        file_class.get_mut(&Yaml::String("fieldsOrder".to_string()))?
+            .as_mut_vec()?
+            .push(Yaml::String(std::str::from_utf8(&id).unwrap().to_string()));
+        id[0] += 1;
+    }
+
+    let mut processed_fileclass = String::new();
+    let mut emitter = YamlEmitter::new(&mut processed_fileclass);
+    emitter.dump(file_class_yaml.first().unwrap()).ok()?;
+    processed_fileclass.push_str("\n---"); // misses this for some reason
+
+    Some((field_names, processed_fileclass))
 }
 
 // ugly code to strip the --- off the start and end from inline yaml
