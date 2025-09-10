@@ -5,29 +5,19 @@ use yaml_rust2::{Yaml, YamlEmitter};
 use yaml_rust2::yaml::Hash;
 
 #[derive(Debug)]
-struct ArgumentError(String);
+struct Error(String);
 
-impl fmt::Display for ArgumentError {
+impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "Argument error: {}", self.0)
+        write!(f, "{}", self.0)
     }
 }
 
-impl std::error::Error for ArgumentError {}
+impl std::error::Error for Error {}
 
-impl From<io::Error> for ArgumentError {
+impl From<io::Error> for Error {
     fn from(value: io::Error) -> Self {
-        ArgumentError(value.to_string())
-    }
-}
-impl From<std::str::Utf8Error> for ArgumentError {
-    fn from(_: std::str::Utf8Error) -> Self {
-        ArgumentError("found invalid utf8".to_string())
-    }
-}
-impl From<yaml_rust2::ScanError> for ArgumentError {
-    fn from(_: yaml_rust2::ScanError) -> Self {
-        ArgumentError("yaml scan error".to_string())
+        Error(format!("io error: {}", value))
     }
 }
 
@@ -45,66 +35,95 @@ struct CompanyEntry {
     attending_sessions: Vec<String>,
 }
 
-fn main() -> Result<(), ArgumentError> {
-    let mut args: Vec<String> = std::env::args().skip(1).collect();
+struct CliArgs {
+    input_path: String,
+    output_path: Option<String>,
+    template_path: Option<String>,
+    verbose: bool,
+}
 
-    let is_verbose = match args.iter().position(|a| a == "-v" || a == "--verbose") {
-        Some(idx) => {
-            args.remove(idx);
-            true
-        },
-        None => false,
-    };
-    let no_output = match args.iter().position(|a| a == "-no" || a == "--no-output") {
-        Some(idx) => {
-            args.remove(idx);
-            true
-        },
-        None => false,
-    };
-    let is_help = match args.iter().position(|a| a == "-h" || a == "--help") {
-        Some(idx) => {
-            args.remove(idx);
-            true
-        },
-        None => false,
-    };
+// will exit program early if --help is passed, I do not care
+fn parse_cli() -> Result<CliArgs, Error> {
+    let args: Vec<String> = std::env::args().skip(1).collect();
 
+    let is_help = args.iter().any(|a| a == "-h" || a == "--help") || args.is_empty();
     if is_help {
-        println!("Will show help later");
-        return Ok(());
+        print_help_msg();
+        std::process::exit(0);
     }
 
-    let input_file_path = match args.get(0) {
-        Some(_) => args.remove(0),
-        None => return Err(ArgumentError("no input path provided".to_string())),
+    let is_verbose = args.iter().any(|a| a == "-v" || a == "--verbose");
+
+    let input_data_path = match args.iter().position(|a| a == "-i" || a == "--input") {
+        Some(idx) => {
+            match args.get(idx + 1) {
+                Some(value) if !value.starts_with('-') => Ok(value.clone()),
+                _ => Err(Error(format!("expected a value for {}", args[idx]))),
+            }
+        },
+        None => Err(Error(format!("must supply input data: --input [path_to_input]"))),
+    };
+    let template_data_path = match args.iter().position(|a| a == "-t" || a == "--template") {
+        Some(idx) => {
+            match args.get(idx + 1) {
+                Some(value) if !value.starts_with('-') => Ok(Some(value.clone())),
+                _ => Err(Error(format!("expected a value for {}", args[idx]))),
+            }
+        },
+        None => Ok(None),
+    };
+    let output_data_path = match args.iter().position(|a| a == "-o" || a == "--output") {
+        Some(idx) => {
+            match args.get(idx + 1) {
+                Some(value) if !value.starts_with('-') => Ok(Some(value.clone())),
+                _ => Err(Error(format!("expected a value for {}", args[idx]))),
+            }
+        },
+        None => Ok(None),
     };
 
-    let input_data = fs::read(input_file_path)?;
+    Ok(CliArgs {
+        input_path: input_data_path?,
+        output_path: output_data_path?,
+        template_path: template_data_path?,
+        verbose: is_verbose,
+    })
+}
+
+fn main() {
+    match real_main() {
+        Ok(()) => {},
+        Err(e) => println!("{}", e)
+    };
+}
+
+// wrapper so that main prints Error Display rather than Debug
+fn real_main() -> Result<(), Error> {
+        let cli_args = parse_cli()?;
+
+    let input_data = fs::read(&cli_args.input_path)?;
 
     let json_data: serde_json::Value = match serde_json::from_slice(&input_data) {
         Ok(data) => data,
-        Err(e) => return Err(ArgumentError("failed parsing json".to_string())),
+        Err(_) => return Err(Error("input data is invalid json".to_string())),
     };
 
     let json_entries = match &json_data["results"] {
         serde_json::Value::Array(entries) => entries,
-        _ => return Err(ArgumentError("invalid json data".to_string())),
+        _ => return Err(Error("input data is an invalid format".to_string())),
     };
-
-    // parsing ////////////////////////////////////////////////////////////////
 
     // value to string
     let v2s = |v: &serde_json::Value, err: &str| {
         match v {
             serde_json::Value::String(inner) => Ok(inner.clone()),
-            _ => Err(ArgumentError(err.to_string())),
+            _ => Err(Error(format!("json missing field: {}", err))),
         }
     };
 
     let mut companies = Vec::new();
 
-    // should also include entry index in error
+    // maybe should also include entry index in error
     for json_entry in json_entries {
         let name = v2s(&json_entry["employer"]["name"], "name")?;
         let description = v2s(&json_entry["company_description"], "description")?;
@@ -114,21 +133,21 @@ fn main() -> Result<(), ArgumentError> {
         let work_authorization = v2s(&json_entry["work_authorization_requirements"], "work_auth")?;
         let job_titles = v2s(&json_entry["job_titles"], "job_titles")?;
 
-        let job_types: Result<Vec<String>, ArgumentError> = match &json_entry["job_types"] {
+        let job_types: Result<Vec<String>, Error> = match &json_entry["job_types"] {
             serde_json::Value::Array(arr) => arr.iter().map(|entry| v2s(&entry["name"], "job_type")).collect(),
-            _ => return Err(ArgumentError("job_types".to_string())),
+            _ => return Err(Error("json missing field: job_types".to_string())),
         };
-        let majors: Result<Vec<String>, ArgumentError> = match &json_entry["majors"] {
+        let majors: Result<Vec<String>, Error> = match &json_entry["majors"] {
             serde_json::Value::Array(arr) => arr.iter().map(|entry| v2s(&entry["name"], "major")).collect(),
-            _ => return Err(ArgumentError("majors".to_string())),
+            _ => return Err(Error("json missing field: majors".to_string())),
         };
-        let school_years: Result<Vec<String>, ArgumentError> = match &json_entry["school_years"] {
+        let school_years: Result<Vec<String>, Error> = match &json_entry["school_years"] {
             serde_json::Value::Array(arr) => arr.iter().map(|entry| v2s(&entry["name"], "school_year")).collect(),
-            _ => return Err(ArgumentError("school_years".to_string())),
+            _ => return Err(Error("json missing field: school_years".to_string())),
         };
-        let attending_sessions: Result<Vec<String>, ArgumentError> = match &json_entry["attending_career_fair_sessions"] {
+        let attending_sessions: Result<Vec<String>, Error> = match &json_entry["attending_career_fair_sessions"] {
             serde_json::Value::Array(arr) => arr.iter().map(|entry| v2s(&entry["display_name"], "session")).collect(),
-            _ => return Err(ArgumentError("sessions".to_string())),
+            _ => return Err(Error("json missing field: sessions".to_string())),
         };
 
         companies.push(CompanyEntry {
@@ -146,23 +165,24 @@ fn main() -> Result<(), ArgumentError> {
         });
     }
 
-    println!("rendering data for {} companies", companies.len());
+    if cli_args.verbose {
+        println!("rendering data for {} companies", companies.len());
+    }
 
+    // todo: let this be given by the user, still should have a default
     let template_path = "./vault_templates/career_fair_2025_template";
 
     let (user_fields, new_fileclass) = match read_fileclass_yaml(PathBuf::from(template_path).join("classes/company.md")) {
         Some((fields, fileclass)) => (fields, fileclass),
-        None => return Err(ArgumentError("failed reading fileClass yaml".to_string())),
+        None => return Err(Error("failed reading fileClass yaml".to_string())),
     };
 
-    if no_output {
-        println!("Exiting with no output");
-        return Ok(());
-    }
-
-    let output_path = match args.get(0) {
-        Some(_) => args.remove(0),
-        None => return Err(ArgumentError("no output path provided, pass --no-ouptput if intentional".to_string())),
+    let output_path = match cli_args.output_path {
+        Some(path) => path,
+        None => {
+            println!("Exiting with no output");
+            return Ok(())
+        },
     };
 
     copy_dir_recurse(template_path.into(), output_path.clone().into())?;
@@ -197,7 +217,7 @@ fn main() -> Result<(), ArgumentError> {
 
         if fs::write(&file_path, &file_text).is_err() {
             let alt_path = companies_dir.join(format!("error{i}.md"));
-            if is_verbose {
+            if cli_args.verbose {
                 println!("Failed to write: {}. Instead writing: {}", file_path.to_string_lossy(), alt_path.to_string_lossy());
             }
             file_text.push_str("==This file failed to write, likely because of an issue with the name. If everything else looks fine then you can set the name yourself==\n\n");
@@ -289,4 +309,18 @@ fn copy_dir_recurse(src: std::path::PathBuf, dst: std::path::PathBuf) -> io::Res
         }
     }
     Ok(())
+}
+
+fn print_help_msg() {
+    let msg = ["This tool generates an obsidian vault based on career fair data\n",
+    "\n",
+    "Basic usage: cargo run -- --input [path_to_input_data] --out [path_to_put_vault]\n",
+    "\n",
+    "Arguments:\n",
+    "   -i/--input [path_to_input_data] : required path to the json that contains the data to render\n",
+    "   -o/--out [output_path]          : required path to put the generated vault\n",
+    "   -t/--template [template_path]   : optional path to the template vault or will use a default\n",
+    "   -v/--verbose                    : optional prints more debug info\n",
+    "   -h/--help                       : prints this message\n"];
+    println!("{}", msg.concat());
 }
