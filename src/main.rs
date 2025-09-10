@@ -169,12 +169,19 @@ fn real_main() -> Result<(), Error> {
         println!("rendering data for {} companies", companies.len());
     }
 
-    // todo: let this be given by the user, still should have a default
-    let template_path = "./vault_templates/career_fair_2025_template";
+    let template_path = match &cli_args.template_path {
+        Some(path) => path,
+        None => "./vault_templates/career_fair_2025_template",
+    };
 
-    let (user_fields, new_fileclass) = match read_fileclass_yaml(PathBuf::from(template_path).join("classes/company.md")) {
+    let file_class_bytes = match fs::read(PathBuf::from(template_path).join("classes/company.md")) {
+        Ok(bytes) => bytes,
+        Err(e) => return Err(Error(format!("could not read template path: {}", e))),
+    };
+
+    let (user_fields, new_fileclass) = match read_fileclass_yaml(&file_class_bytes) {
         Some((fields, fileclass)) => (fields, fileclass),
-        None => return Err(Error("failed reading fileClass yaml".to_string())),
+        None => return Err(Error("failed reading fileClass".to_string())),
     };
 
     let output_path = match cli_args.output_path {
@@ -229,9 +236,8 @@ fn real_main() -> Result<(), Error> {
     Ok(())
 }
 
-fn read_fileclass_yaml(file_path: PathBuf) -> Option<(Vec<String>, String)> {
-    let file_class_bytes = fs::read(file_path).ok()?;
-    let file_class_str = std::str::from_utf8(clean_yaml_md_file(&file_class_bytes)).ok()?;
+fn read_fileclass_yaml(file_class_bytes: &[u8]) -> Option<(Vec<String>, String)> {
+    let file_class_str = std::str::from_utf8(clean_yaml_md_file(file_class_bytes)).ok()?;
     let mut file_class_yaml = yaml_rust2::YamlLoader::load_from_str(file_class_str).ok()?;
     let file_class = file_class_yaml.first_mut()?.as_mut_hash()?;
 
