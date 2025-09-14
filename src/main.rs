@@ -192,10 +192,13 @@ fn real_main() -> Result<(), Error> {
         },
     };
 
-    copy_dir_recurse(template_path.into(), output_path.clone().into())?;
+    if let Err(e) = copy_dir_recurse(template_path.into(), output_path.clone().into()) {
+        return Err(Error(format!("failed copying template to output path: {}", e)));
+    };
     fs::write(PathBuf::from(output_path.clone()).join("classes/company.md"), new_fileclass)?;
 
     let companies_dir = PathBuf::from(output_path.clone()).join("companies");
+    fs::create_dir_all(&companies_dir)?;
 
     for (i, company) in companies.iter().enumerate() {
         let file_path = companies_dir.join(company.name.clone() + ".md");
@@ -229,7 +232,9 @@ fn real_main() -> Result<(), Error> {
             }
             file_text.push_str("==This file failed to write, likely because of an issue with the name. If everything else looks fine then you can set the name yourself==\n\n");
             file_text.push_str(&format!("**Company name:** {}\n", company.name));
-            fs::write(alt_path, &file_text)?;
+            if fs::write(alt_path, &file_text).is_err() {
+                return Err(Error("unable to write company file".to_string()));
+            }
         }
     }
 
